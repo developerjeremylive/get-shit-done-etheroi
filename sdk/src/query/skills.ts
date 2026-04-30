@@ -125,5 +125,8 @@ export const agentSkills: QueryHandler = async (args, projectDir) => {
   const lines = validEntries.map((e) => `- @${e.ref}`).join('\n');
   return {
     data: `<agent_skills>\nRead these user-configured skills:\n${lines}\n</agent_skills>`,
+    // Emit as raw text so workflows can interpolate the block via
+    // `$(gsd-sdk query agent-skills <type>)` without JSON quoting / escaped \n. (#2914)
+    format: 'text',
   };
 };

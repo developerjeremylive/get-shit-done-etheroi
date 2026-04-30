@@ -24,6 +24,15 @@ import { GSDError, ErrorClassification } from '../errors.js';
 /** Structured result returned by all query handlers. */
 export interface QueryResult<T = unknown> {
   data: T;
+  /**
+   * Output mode for the CLI wrapper.
+   * - `'json'` (default): CLI emits `JSON.stringify(data, null, 2)` followed by a newline.
+   * - `'text'`: CLI writes `String(data)` raw to stdout — no JSON quoting, no escaping,
+   *   no trailing newline. Use for handlers whose output is interpolated verbatim
+   *   into shell-substituted contexts (e.g. `$(gsd-sdk query agent-skills <type>)`
+   *   embedded into a Task() spawn prompt). See #2914.
+   */
+  format?: 'json' | 'text';
 }
 
 /** Signature for a query handler function. */

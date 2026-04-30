@@ -443,7 +443,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
           output = extractField(output, pickField);
         }
 
-        console.log(JSON.stringify(output, null, 2));
+        // Handlers that opt into `format: 'text'` emit raw stdout so callers
+        // can interpolate the value verbatim (e.g. via `$(gsd-sdk query …)`).
+        // `--field` extraction always falls back to JSON because the picked
+        // value may be a non-string. (#2914)
+        if (result.format === 'text' && !pickField) {
+          process.stdout.write(String(output));
+        } else {
+          console.log(JSON.stringify(output, null, 2));
+        }
       }
     } catch (err) {
       if (err instanceof GSDError) {
