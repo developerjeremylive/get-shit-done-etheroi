@@ -8768,7 +8768,9 @@ function isGsdSdkOnPath() {
  * primitive there; we don't try to fabricate a .cmd shim).
  */
 function trySelfLinkGsdSdk(shimSrc) {
-  if (process.platform === 'win32') return null;
+  if (process.platform === 'win32') {
+    return trySelfLinkGsdSdkWindows(shimSrc);
+  }
   const path = require('path');
   const fs = require('fs');
   const home = os.homedir();
@@ -8823,6 +8825,123 @@ function trySelfLinkGsdSdk(shimSrc) {
     }
   }
   return null;
+}
+
+/**
+ * #2962: Windows counterpart to trySelfLinkGsdSdk. Prior to this, the function
+ * unconditionally returned null on Windows ("we don't try to fabricate a .cmd
+ * shim there"), which left `--sdk --global` installs without a callable
+ * `gsd-sdk` on PATH despite the installer reporting success.
+ *
+ * Strategy: discover npm's global bin directory via `npm prefix -g` (which on
+ * Windows IS the bin dir, no `bin/` suffix — see line 8721) and write the same
+ * three-file shim set npm itself emits: `gsd-sdk.cmd` (cmd.exe), `gsd-sdk.ps1`
+ * (PowerShell), and a Bash wrapper named `gsd-sdk` (for Cygwin/MSYS/Git-Bash).
+ * Each shim invokes `node "<absolute path to bin/gsd-sdk.js>"` with passed
+ * args so the shim location is decoupled from the SDK location — same logical
+ * structure as the POSIX wrapper-via-require() fallback above.
+ *
+ * Returns the .cmd file path on success (the primary handle the installer's
+ * onPath check looks for), null otherwise.
+ */
+/**
+ * Pure builder: compute the structured Windows shim triple from a shimSrc path.
+ * No filesystem I/O, no spawn — produces the IR that `trySelfLinkGsdSdkWindows`
+ * then renders to disk. Exposed for tests so assertions can run against typed
+ * fields (interpreter, shimAbs, eol, fileNames) instead of substring matches
+ * over rendered shim text.
+ */
+function buildWindowsShimTriple(shimSrc) {
+  const path = require('path');
+  const shimAbs = path.resolve(shimSrc);
+  // JSON.stringify produces a double-quoted string with backslash+quote
+  // escaping — the safe quoting form for cmd.exe and PowerShell paths alike.
+  const shimQuoted = JSON.stringify(shimAbs);
+
+  const invocation = {
+    interpreter: 'node',
+    target: shimAbs,
+  };
+
+  // Renderers are template literals — the only place text is constructed.
+  // Tests do not parse these strings; they assert on the typed fields above.
+  const renderCmd = () =>
+    '@ECHO OFF\r\n@SETLOCAL\r\n@node ' + shimQuoted + ' %*\r\n';
+  const renderPs1 = () =>
+    '#!/usr/bin/env pwsh\n& node ' + shimQuoted + ' $args\nexit $LASTEXITCODE\n';
+  const renderSh = () =>
+    '#!/usr/bin/env sh\nexec node ' + shimQuoted + ' "$@"\n';
+
+  return {
+    invocation,
+    eol: { cmd: '\r\n', ps1: '\n', sh: '\n' },
+    fileNames: { cmd: 'gsd-sdk.cmd', ps1: 'gsd-sdk.ps1', sh: 'gsd-sdk' },
+    render: { cmd: renderCmd, ps1: renderPs1, sh: renderSh },
+  };
+}
+
+function trySelfLinkGsdSdkWindows(shimSrc) {
+  const path = require('path');
+  const fs = require('fs');
+  const cp = require('child_process');
+
+  let npmPrefix;
+  try {
+    // On Windows, `npm` is `npm.cmd` — Node's child_process docs explicitly
+    // call out that .cmd/.bat files cannot be spawned via execFile/execFileSync
+    // without a shell ("Spawning .bat and .cmd files on Windows" section).
+    // Match the existing convention at line ~8718 which uses execSync for the
+    // same `npm prefix -g` lookup. Inputs here are static literals, so shell
+    // interpolation is not an injection vector.
+    npmPrefix = cp
+      .execSync('npm prefix -g', {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+      .trim();
+  } catch {
+    return null;
+  }
+  if (!npmPrefix || !fs.existsSync(npmPrefix)) return null;
+
+  // Verify writability before producing partial shim sets.
+  try {
+    fs.mkdirSync(npmPrefix, { recursive: true });
+    const probe = path.join(npmPrefix, '.gsd-sdk-write-probe');
+    fs.writeFileSync(probe, '');
+    fs.unlinkSync(probe);
+  } catch {
+    return null;
+  }
+
+  const triple = buildWindowsShimTriple(shimSrc);
+  const targets = {
+    cmd: path.join(npmPrefix, triple.fileNames.cmd),
+    ps1: path.join(npmPrefix, triple.fileNames.ps1),
+    sh: path.join(npmPrefix, triple.fileNames.sh),
+  };
+
+  try {
+    // Replace any existing shims — they may be stale (prior install of an
+    // older version pointing at a now-absent shim path).
+    for (const target of Object.values(targets)) {
+      try { fs.unlinkSync(target); } catch {}
+    }
+    fs.writeFileSync(targets.cmd, triple.render.cmd());
+    fs.writeFileSync(targets.ps1, triple.render.ps1());
+    fs.writeFileSync(targets.sh, triple.render.sh());
+    // chmod is a no-op on Windows-native node but harmless; sets exec bit on
+    // WSL-mounted filesystems where Bash users live.
+    try { fs.chmodSync(targets.sh, 0o755); } catch {}
+    return targets.cmd;
+  } catch {
+    // Partial-write on permission flap — best-effort cleanup so the next run
+    // starts from a clean slate.
+    for (const target of Object.values(targets)) {
+      try { fs.unlinkSync(target); } catch {}
+    }
+    return null;
+  }
 }
 
 /**
@@ -8954,6 +9073,10 @@ if (process.env.GSD_TEST_MODE) {
     restoreUserArtifacts,
     USER_OWNED_ARTIFACTS,
     finishInstall,
+    trySelfLinkGsdSdk,
+    trySelfLinkGsdSdkWindows,
+    buildWindowsShimTriple,
+    isGsdSdkOnPath,
     homePathCoveredByRc,
     maybeSuggestPathExport,
     runtimeMap,
