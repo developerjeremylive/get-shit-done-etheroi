@@ -7339,15 +7339,55 @@ function install(isGlobal, runtime = 'claude') {
     // No skills/commands directory needed. Engine is installed via copyWithPathReplacement.
     console.log(`  ${green}✓${reset} Cline: commands will be available via .clinerules`);
   } else if (isGemini) {
-    const commandsDir = path.join(targetDir, 'commands');
-    fs.mkdirSync(commandsDir, { recursive: true });
-    const gsdSrc = stageSkillsForMode(path.join(src, 'commands', 'gsd'), installMode);
-    const gsdDest = path.join(commandsDir, 'gsd');
-    copyWithPathReplacement(gsdSrc, gsdDest, pathPrefix, runtime, true, isGlobal);
-    if (verifyInstalled(gsdDest, 'commands/gsd')) {
-      console.log(`  ${green}✓${reset} Installed commands/gsd`);
+    // #3037: when running --local --gemini and a GSD-managed user-scope
+    // command directory already exists at ~/.gemini/commands/gsd/, skip
+    // the local copy. Gemini conflict-detects by command name across
+    // scopes and renames every overlapping /gsd:* command to
+    // /workspace.gsd:* and /user.gsd:*, breaking the documented namespace.
+    // The user-scope install already provides the same commands, so the
+    // local copy adds zero value at the cost of namespace conflicts.
+    //
+    // CR #3041 (Major): the detection must be specific to PACKAGE-MANAGED
+    // GSD content, not just "directory is non-empty". A user who hand-
+    // dropped a single override (e.g. ~/.gemini/commands/gsd/my-override
+    // .toml) would otherwise be unable to run a local install at all.
+    // Detection rule: at least 3 of the canonical GSD command files
+    // ('help.toml', 'progress.toml', 'new-project.toml') must be present.
+    // These three ship in every GSD Gemini install (minimal mode included
+    // — they're in the core skill set per #2790's consolidation), and 3-of-
+    // 3 with that specific basename set is structurally impossible to
+    // produce by accident.
+    const homeGeminiGsd = path.join(os.homedir(), '.gemini', 'commands', 'gsd');
+    const GSD_MANAGED_CANARIES = ['help.toml', 'progress.toml', 'new-project.toml'];
+    const userScopeHasGsd =
+      !isGlobal &&
+      path.resolve(targetDir) !== path.resolve(path.join(os.homedir(), '.gemini')) &&
+      fs.existsSync(homeGeminiGsd) &&
+      GSD_MANAGED_CANARIES.every((f) =>
+        fs.existsSync(path.join(homeGeminiGsd, f))
+      );
+
+    if (userScopeHasGsd) {
+      console.log(
+        `  ${yellow}⚠${reset}  Skipping commands/gsd/ for local install — GSD is already installed at user scope (${homeGeminiGsd}).`
+      );
+      console.log(
+        `      Gemini conflict-detects across scopes and would rename every /gsd:* command to /workspace.gsd:* and /user.gsd:*.`
+      );
+      console.log(
+        `      The user-scope install already provides /gsd:* commands in this project; no local copy is needed.`
+      );
     } else {
-      failures.push('commands/gsd');
+      const commandsDir = path.join(targetDir, 'commands');
+      fs.mkdirSync(commandsDir, { recursive: true });
+      const gsdSrc = stageSkillsForMode(path.join(src, 'commands', 'gsd'), installMode);
+      const gsdDest = path.join(commandsDir, 'gsd');
+      copyWithPathReplacement(gsdSrc, gsdDest, pathPrefix, runtime, true, isGlobal);
+      if (verifyInstalled(gsdDest, 'commands/gsd')) {
+        console.log(`  ${green}✓${reset} Installed commands/gsd`);
+      } else {
+        failures.push('commands/gsd');
+      }
     }
   } else if (isGlobal) {
     // Claude Code global: skills/ format (2.1.88+ compatibility)
