@@ -106,7 +106,38 @@ function build() {
     if (hook.endsWith('.sh')) {
       try { fs.chmodSync(stagedDest, 0o755); } catch (e) { /* Windows */ }
     }
-    fs.renameSync(stagedDest, dest);
+    // Windows can intermittently fail rename with EPERM/EBUSY (virus scanners,
+    // file indexing, etc). Retry a few times, then fall back to copy+unlink.
+    let renamed = false;
+    const maxRetries = 3;
+    for (let attempt = 0; attempt < maxRetries && !renamed; attempt++) {
+      try {
+        fs.renameSync(stagedDest, dest);
+        renamed = true;
+      } catch (e) {
+        const isTransient = process.platform === 'win32' &&
+                           (e.code === 'EPERM' || e.code === 'EBUSY');
+        if (isTransient && attempt < maxRetries - 1) {
+          // Wait with backoff before retry
+          const backoffMs = 50 * (attempt + 1);
+          const start = Date.now();
+          while (Date.now() - start < backoffMs) { /* busy wait */ }
+        } else if (isTransient) {
+          // Final fallback: copy-then-unlink (non-atomic but works)
+          try {
+            fs.copyFileSync(stagedDest, dest);
+            fs.unlinkSync(stagedDest);
+            renamed = true;
+            console.warn(`  Warning: used fallback copy for ${hook} (rename failed: ${e.code})`);
+          } catch (fallbackErr) {
+            console.error(`  Error: failed to copy ${hook}: ${fallbackErr.message}`);
+          }
+        } else {
+          // Non-transient error, rethrow
+          throw e;
+        }
+      }
+    }
   }
 
   // Best-effort cleanup of the staging dir. If concurrent builders are still
